@@ -1,450 +1,3 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-
-/**
- * Fasting Coach — a lightweight, offline-first fasting tracker
- * Happy Rafols, this mirrors the "weekly pattern" app vibe but focused purely on fasting.
- *
- * Features
- * - Start a fast now or set the last-meal time manually (datetime-local)
- * - Live-updating elapsed fasting time (hh:mm:ss)
- * - Milestone benefits by hour (12h, 13h, ... up to 72h by default)
- * - Contextual tips per phase (distraction ideas, hydration, electrolytes, light workout, sleep)
- * - Set a target (e.g., 16/18/24) with an animated progress ring
- * - Log completed fasts; see weekly stats & streak
- * - All data persists in localStorage
- *
- * Disclaimer: Not medical advice. If you have gout (as you mentioned) or other conditions,
- * be conservative and listen to your body. Stop if you feel unwell.
- */
-
-// ---- Utilities ----
-const pad = (n: number) => String(n).padStart(2, "0");
-const HOUR = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR;
-
-function formatDuration(ms: number) {
-  if (ms < 0) ms = 0;
-  const totalSeconds = Math.floor(ms / 1000);
-  const h = Math.floor(totalSeconds / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-  const s = totalSeconds % 60;
-  return `${pad(h)}:${pad(m)}:${pad(s)}`;
-}
-
-function hoursFloat(ms: number) {
-  return Math.max(0, ms / HOUR);
-}
-
-// ---- Default content ----
-const DEFAULT_BENEFITS: Record<number, { title: string; desc: string }> = {
-  12: { title: "Glycogen Taper", desc: "Body begins relying less on glycogen; mild fat burning rises." },
-  13: { title: "Hunger Wave #1", desc: "First ghrelin peak; distraction helps (walk, work, hydrate)." },
-  14: { title: "Fat Oxidation ↑", desc: "Insulin stays low; fat mobilization ramps up." },
-  15: { title: "Mental Clarity", desc: "Many feel clearer as blood sugar fluctuations settle." },
-  16: { title: "Autophagy (Early)", desc: "Cellular cleanup pathways start nudging on for many people." },
-  18: { title: "Ketone Rise", desc: "Ketones increase; some notice steady energy and focus." },
-  20: { title: "Hunger Wave #2", desc: "Ride it out: salt + water, a short walk, light chores." },
-  24: { title: "24‑Hour Reset", desc: "Deeper fat use; appetite hormones often recalibrate." },
-  36: { title: "Deeper Autophagy", desc: "Cellular recycling intensifies; keep electrolytes in check." },
-  48: { title: "Inflammation Down?", desc: "Some experience reduced inflammation markers over time." },
-  60: { title: "Deep Ketosis", desc: "Fat metabolism dominates; be mindful of rest & salt." },
-  72: { title: "3‑Day Mark", desc: "Advanced fast. Break gently; consider medical guidance." },
-};
-
-const DEFAULT_TIPS: { range: [number, number]; tips: string[] }[] = [
-  {
-    range: [0, 12],
-    tips: [
-      "Hydrate early; add a pinch of salt if needed.",
-      "Plan your fasting window activities to avoid mindless snacking.",
-      "Black coffee/tea ok (no sugar); check your personal tolerance.",
-    ],
-  },
-  {
-    range: [12, 18],
-    tips: [
-      "Light movement: 10–20 min walk or mobility routine.",
-      "Busy brain > busy mouth: deep work block.",
-      "Electrolytes: water + salt; avoid sweeteners if they trigger hunger.",
-    ],
-  },
-  {
-    range: [18, 24],
-    tips: [
-      "Do what works for you: a short workout often blunts hunger (your note).",
-      "Warm liquids (tea) can quiet cravings.",
-      "Prepare your break-fast meal in advance to avoid overeating.",
-    ],
-  },
-  {
-    range: [24, 36],
-    tips: [
-      "Prioritize sleep; fasting can be stimulating—wind down early.",
-      "Mind the salt; mild headaches often mean electrolytes/water.",
-      "Avoid intense new workouts; keep it easy and restorative.",
-    ],
-  },
-  {
-    range: [36, 999],
-    tips: [
-      "Consider medical guidance for extended fasts.",
-      "Break gently with protein + low‑fiber foods; reintroduce slowly.",
-      "Stop if you feel unwell—health over streaks.",
-    ],
-  },
-];
-
-// ---- Local storage helpers ----
-const LS_KEYS = {
-  CURRENT_START: "fasting.currentStart",
-  SESSIONS: "fasting.sessions",
-  TARGET_HOURS: "fasting.targetHours",
-};
-
-interface Session {
-  start: number; // ms
-  end: number; // ms
-}
-
-function readSessions(): Session[] {
-  try {
-    const raw = localStorage.getItem(LS_KEYS.SESSIONS);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeSessions(sessions: Session[]) {
-  localStorage.setItem(LS_KEYS.SESSIONS, JSON.stringify(sessions));
-}
-
-function readCurrentStart(): number | null {
-  const raw = localStorage.getItem(LS_KEYS.CURRENT_START);
-  return raw ? Number(raw) : null;
-}
-
-function writeCurrentStart(ms: number | null) {
-  if (ms == null) localStorage.removeItem(LS_KEYS.CURRENT_START);
-  else localStorage.setItem(LS_KEYS.CURRENT_START, String(ms));
-}
-
-function readTargetHours(): number {
-  const raw = localStorage.getItem(LS_KEYS.TARGET_HOURS);
-  return raw ? Number(raw) : 16; // default 16h
-}
-
-function writeTargetHours(h: number) {
-  localStorage.setItem(LS_KEYS.TARGET_HOURS, String(h));
-}
-
-// ---- Progress Ring ----
-function ProgressRing({ value, target }: { value: number; target: number }) {
-  const pct = Math.min(100, (value / target) * 100);
-  const size = 140;
-  const stroke = 10;
-  const radius = (size - stroke) / 2;
-  const circ = 2 * Math.PI * radius;
-  const dash = (pct / 100) * circ;
-  return (
-    <svg width={size} height={size} className="block">
-      <circle cx={size / 2} cy={size / 2} r={radius} strokeWidth={stroke} strokeOpacity={0.15} stroke="currentColor" fill="none" />
-      <circle
-        cx={size / 2}
-        cy={size / 2}
-        r={radius}
-        strokeWidth={stroke}
-        strokeLinecap="round"
-        stroke="currentColor"
-        fill="none"
-        strokeDasharray={`${dash} ${circ - dash}`}
-        transform={`rotate(-90 ${size / 2} ${size / 2})`}
-      />
-      <text x="50%" y="50%" dominantBaseline="middle" textAnchor="middle" className="text-xl font-semibold">
-        {Math.floor(value)}h
-      </text>
-      <text x="50%" y="64%" dominantBaseline="middle" textAnchor="middle" className="text-xs opacity-70">
-        target {target}h
-      </text>
-    </svg>
-  );
-}
-
-// ---- Main Component ----
-export default function FastingCoachApp() {
-  const [now, setNow] = useState<number>(Date.now());
-  const [startMs, setStartMs] = useState<number | null>(readCurrentStart());
-  const [manualInput, setManualInput] = useState<string>("");
-  const [sessions, setSessions] = useState<Session[]>(readSessions());
-  const [targetHours, setTargetHours] = useState<number>(readTargetHours());
-
-  // live ticker
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  // persist changes
-  useEffect(() => writeCurrentStart(startMs), [startMs]);
-  useEffect(() => writeSessions(sessions), [sessions]);
-  useEffect(() => writeTargetHours(targetHours), [targetHours]);
-
-  const elapsedMs = startMs ? now - startMs : 0;
-  const elapsedHours = hoursFloat(elapsedMs);
-  const currentHourMark = Math.floor(elapsedHours);
-
-  const upcomingBenefit = useMemo(() => {
-    const keys = Object.keys(DEFAULT_BENEFITS).map(Number).sort((a, b) => a - b);
-    for (const k of keys) {
-      if (k > elapsedHours) return { hour: k, ...DEFAULT_BENEFITS[k] };
-    }
-    const last = keys[keys.length - 1];
-    return last ? { hour: last, ...DEFAULT_BENEFITS[last] } : null;
-  }, [elapsedHours]);
-
-  const reachedBenefits = useMemo(() => {
-    const keys = Object.keys(DEFAULT_BENEFITS).map(Number).sort((a, b) => a - b);
-    return keys.filter((k) => k <= elapsedHours).map((k) => ({ hour: k, ...DEFAULT_BENEFITS[k] }));
-  }, [elapsedHours]);
-
-  const phaseTips = useMemo(() => {
-    const h = elapsedHours;
-    const block = DEFAULT_TIPS.find((b) => h >= b.range[0] && h < b.range[1]) || DEFAULT_TIPS[DEFAULT_TIPS.length - 1];
-    return block.tips;
-  }, [elapsedHours]);
-
-  function startNow() {
-    setStartMs(Date.now());
-  }
-
-  function startFromManual() {
-    if (!manualInput) return;
-    const parsed = new Date(manualInput).getTime();
-    if (!isNaN(parsed)) {
-      setStartMs(parsed);
-    }
-  }
-
-  function endFast() {
-    if (!startMs) return;
-    const end = Date.now();
-    const duration = end - startMs;
-    if (duration < 5 * 60 * 1000) {
-      // ignore accidental end <5min
-      setStartMs(null);
-      return;
-    }
-    const newSession: Session = { start: startMs, end };
-    const updated = [newSession, ...sessions].slice(0, 200);
-    setSessions(updated);
-    setStartMs(null);
-  }
-
-  // Weekly stats & streak
-  const nowDate = new Date();
-  const dayOfWeek = nowDate.getDay(); // 0 Sun
-  const startOfWeek = new Date(nowDate);
-  startOfWeek.setDate(nowDate.getDate() - dayOfWeek);
-  startOfWeek.setHours(0, 0, 0, 0);
-
-  const weekSessions = sessions.filter((s) => s.start >= startOfWeek.getTime());
-  const weekHours = weekSessions.reduce((acc, s) => acc + hoursFloat(s.end - s.start), 0);
-
-  const last7Days = Array.from({ length: 7 }).map((_, i) => {
-    const d = new Date(startOfWeek.getTime() + i * DAY_MS);
-    const dayStart = d.getTime();
-    const dayEnd = dayStart + DAY_MS;
-    const hrs = sessions
-      .filter((s) => s.start >= dayStart && s.start < dayEnd)
-      .reduce((acc, s) => acc + hoursFloat(s.end - s.start), 0);
-    return { label: d.toLocaleDateString(undefined, { weekday: "short" }), hours: Number(hrs.toFixed(1)) };
-  });
-
-  const streak = useMemo(() => {
-    // Count consecutive days (including today if a session exists or an active fast started today)
-    let count = 0;
-    for (let i = 0; i < 30; i++) {
-      const dayStart = new Date();
-      dayStart.setHours(0, 0, 0, 0);
-      dayStart.setDate(dayStart.getDate() - i);
-      const dayEnd = dayStart.getTime() + DAY_MS;
-      const had = sessions.some((s) => s.start >= dayStart.getTime() && s.start < dayEnd);
-      const activeToday = startMs && startMs >= dayStart.getTime() && startMs < dayEnd;
-      if (had || activeToday) count++; else break;
-    }
-    return count;
-  }, [sessions, startMs]);
-
-  const targetProgressHours = Math.min(elapsedHours, targetHours);
-
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-6 flex justify-center">
-      <div className="w-full max-w-5xl grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* LEFT: Live timer & controls */}
-        <section className="md:col-span-2 bg-slate-900 rounded-2xl p-6 shadow-lg border border-slate-800">
-          <header className="flex items-center justify-between mb-4">
-            <h1 className="text-2xl font-bold">Fasting Coach</h1>
-            <div className="text-sm opacity-70">Asia/Manila time</div>
-          </header>
-
-          <div className="flex flex-col md:flex-row gap-6 items-center">
-            <div className="shrink-0">
-              <ProgressRing value={targetProgressHours} target={targetHours} />
-            </div>
-            <div className="flex-1">
-              <div className="text-5xl font-extrabold tracking-tight">{formatDuration(elapsedMs)}</div>
-              <div className="mt-1 text-sm opacity-80">Elapsed since last meal</div>
-
-              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <button onClick={startNow} className="bg-emerald-500 hover:bg-emerald-600 active:scale-[.99] transition rounded-xl px-4 py-2 font-semibold">Start Now</button>
-                <div className="flex gap-2">
-                  <input
-                    type="datetime-local"
-                    value={manualInput}
-                    onChange={(e) => setManualInput(e.target.value)}
-                    className="w-full bg-slate-800 rounded-xl px-3 py-2 outline-none border border-slate-700"
-                  />
-                  <button onClick={startFromManual} className="bg-slate-700 hover:bg-slate-600 rounded-xl px-3 py-2">Set</button>
-                </div>
-                <button onClick={endFast} className="bg-sky-500 hover:bg-sky-600 rounded-xl px-4 py-2 font-semibold">End & Log</button>
-                <div className="flex items-center gap-2">
-                  <label className="text-sm opacity-80">Target (h)</label>
-                  <input
-                    type="number"
-                    min={12}
-                    max={72}
-                    step={1}
-                    value={targetHours}
-                    onChange={(e) => setTargetHours(Number(e.target.value))}
-                    className="w-24 bg-slate-800 rounded-xl px-3 py-2 outline-none border border-slate-700"
-                  />
-                </div>
-              </div>
-
-              <div className="mt-4 text-sm">
-                <div className="opacity-80">Current hour mark</div>
-                <div className="text-xl font-semibold">{currentHourMark} h</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Benefits & Tips */}
-          <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="bg-slate-800/50 rounded-2xl p-4 border border-slate-700">
-              <h2 className="text-lg font-bold mb-3">Benefits Reached</h2>
-              <ul className="space-y-2 max-h-64 overflow-auto pr-1">
-                {reachedBenefits.length === 0 && (
-                  <li className="opacity-70 text-sm">Keep going—first milestone at 12h.</li>
-                )}
-                {reachedBenefits.map((b) => (
-                  <li key={b.hour} className="flex gap-3 items-start">
-                    <div className="text-sm mt-1 w-10 shrink-0 text-emerald-400">{b.hour}h</div>
-                    <div>
-                      <div className="font-semibold">{b.title}</div>
-                      <div className="text-sm opacity-80">{b.desc}</div>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div className="bg-slate-800/50 rounded-2xl p-4 border border-slate-700">
-              <h2 className="text-lg font-bold mb-3">Next Up</h2>
-              {upcomingBenefit ? (
-                <div className="flex gap-3">
-                  <div className="text-sm mt-1 w-12 shrink-0 text-sky-400">{upcomingBenefit.hour}h</div>
-                  <div>
-                    <div className="font-semibold">{upcomingBenefit.title}</div>
-                    <div className="text-sm opacity-80">{upcomingBenefit.desc}</div>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-sm opacity-80">Add milestones in code if you plan to go longer.</div>
-              )}
-
-              <div className="mt-5">
-                <h3 className="font-semibold mb-2">Phase Tips</h3>
-                <ul className="list-disc list-inside space-y-1 text-sm opacity-90">
-                  {phaseTips.map((t, i) => (
-                    <li key={i}>{t}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* RIGHT: History & weekly stats */}
-        <aside className="bg-slate-900 rounded-2xl p-6 shadow-lg border border-slate-800">
-          <h2 className="text-lg font-bold mb-4">History & Weekly View</h2>
-
-          <div className="mb-4 text-sm flex items-center justify-between">
-            <div>
-              <div className="opacity-80">This week total</div>
-              <div className="text-2xl font-semibold">{weekHours.toFixed(1)} h</div>
-            </div>
-            <div className="text-right">
-              <div className="opacity-80">Streak (days)</div>
-              <div className="text-2xl font-semibold">{streak}</div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-7 gap-2 mb-6">
-            {last7Days.map((d, i) => (
-              <div key={i} className="bg-slate-800/60 rounded-xl p-2 text-center border border-slate-700">
-                <div className="text-xs opacity-70">{d.label}</div>
-                <div className="text-lg font-semibold">{d.hours}</div>
-              </div>
-            ))}
-          </div>
-
-          <div className="space-y-3 max-h-72 overflow-auto pr-1">
-            {sessions.length === 0 && (
-              <div className="text-sm opacity-80">No logged fasts yet. When you press “End & Log”, they’ll appear here.</div>
-            )}
-            {sessions.map((s, idx) => {
-              const duration = s.end - s.start;
-              const h = hoursFloat(duration).toFixed(1);
-              const startStr = new Date(s.start).toLocaleString();
-              const endStr = new Date(s.end).toLocaleString();
-              return (
-                <div key={idx} className="bg-slate-800/60 rounded-xl p-3 border border-slate-700">
-                  <div className="flex items-center justify-between">
-                    <div className="font-semibold">{h} h</div>
-                    <button
-                      className="text-xs opacity-70 hover:opacity-100 underline"
-                      onClick={() => {
-                        const filtered = sessions.filter((_, i) => i !== idx);
-                        setSessions(filtered);
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                  <div className="text-xs opacity-80">{startStr} → {endStr}</div>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="mt-6 text-xs opacity-60">
-            Tip: set your last‑meal time exactly (e.g., 7:42 PM) for more precise hours.
-          </div>
-        </aside>
-
-        {/* Footer */}
-        <div className="md:col-span-3 text-xs opacity-60 text-center mt-2">
-          Not medical advice. Stop if unwell. Consider special care with gout—fasting + heavy exercise may aggravate flares for some.
-        </div>
-      </div>
-    </div>
-  );
-}
-
-
-<!-- ========================= -->
-<!-- Single‑file deployment (index.html) for Vercel or any static host -->
-<!-- Put this in a folder by itself as `index.html`. Then upload that folder at vercel.com/new → Upload. -->
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -459,360 +12,152 @@ export default function FastingCoachApp() {
 <body class="bg-slate-950 text-slate-100">
   <div id="root"></div>
 
-  <!-- React 18 + Babel for inline JSX (no build tools required) -->
+  <!-- React + Babel -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <script type="text/babel">
     const { useEffect, useMemo, useState } = React;
-
-    const pad = (n) => String(n).padStart(2, "0");
-    const HOUR = 60 * 60 * 1000;
-    const DAY_MS = 24 * HOUR;
-    const formatDuration = (ms) => {
-      if (ms < 0) ms = 0;
-      const totalSeconds = Math.floor(ms / 1000);
-      const h = Math.floor(totalSeconds / 3600);
-      const m = Math.floor((totalSeconds % 3600) / 60);
-      const s = totalSeconds % 60;
-      return `${pad(h)}:${pad(m)}:${pad(s)}`;
+    const pad = n => String(n).padStart(2,"0");
+    const HOUR = 60*60*1000, DAY_MS = 24*HOUR;
+    const formatDuration = ms => {
+      if(ms<0)ms=0;
+      const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
+      return `${pad(h)}:${pad(m)}:${pad(sec)}`;
     };
-    const hoursFloat = (ms) => Math.max(0, ms / HOUR);
+    const hoursFloat = ms => Math.max(0, ms/HOUR);
 
-    const DEFAULT_BENEFITS = {
-      12: { title: "Glycogen Taper", desc: "Body begins relying less on glycogen; mild fat burning rises." },
-      13: { title: "Hunger Wave #1", desc: "First ghrelin peak; distraction helps (walk, work, hydrate)." },
-      14: { title: "Fat Oxidation ↑", desc: "Insulin stays low; fat mobilization ramps up." },
-      15: { title: "Mental Clarity", desc: "Many feel clearer as blood sugar fluctuations settle." },
-      16: { title: "Autophagy (Early)", desc: "Cellular cleanup pathways start nudging on for many people." },
-      18: { title: "Ketone Rise", desc: "Ketones increase; some notice steady energy and focus." },
-      20: { title: "Hunger Wave #2", desc: "Ride it out: salt + water, a short walk, light chores." },
-      24: { title: "24‑Hour Reset", desc: "Deeper fat use; appetite hormones often recalibrate." },
-      36: { title: "Deeper Autophagy", desc: "Cellular recycling intensifies; keep electrolytes in check." },
-      48: { title: "Inflammation Down?", desc: "Some experience reduced inflammation markers over time." },
-      60: { title: "Deep Ketosis", desc: "Fat metabolism dominates; be mindful of rest & salt." },
-      72: { title: "3‑Day Mark", desc: "Advanced fast. Break gently; consider medical guidance." },
+    const BENEFITS = {
+      12:{title:"Glycogen Taper",desc:"Body begins relying less on glycogen; mild fat burning rises."},
+      13:{title:"Hunger Wave #1",desc:"First ghrelin peak; distraction helps (walk, work, hydrate)."},
+      16:{title:"Autophagy (Early)",desc:"Cellular cleanup begins; insulin remains low."},
+      18:{title:"Ketone Rise",desc:"Fat mobilization; steady energy and focus."},
+      24:{title:"24-Hour Reset",desc:"Deeper fat use; appetite hormones recalibrate."},
+      36:{title:"Deeper Autophagy",desc:"Cellular recycling intensifies."},
+      48:{title:"Inflammation ↓",desc:"Some report reduced inflammation markers."},
+      72:{title:"3-Day Mark",desc:"Advanced fast. Break gently."}
     };
-
-    const DEFAULT_TIPS = [
-      { range: [0, 12], tips: [
-        "Hydrate early; add a pinch of salt if needed.",
-        "Plan activities to avoid mindless snacking.",
-        "Black coffee/tea ok (no sugar).",
-      ]},
-      { range: [12, 18], tips: [
-        "Light movement: 10–20 min walk or mobility.",
-        "Deep work block to ride hunger waves.",
-        "Electrolytes: water + salt; avoid sweeteners that trigger hunger.",
-      ]},
-      { range: [18, 24], tips: [
-        "Short workout can blunt hunger (your note).",
-        "Warm tea can quiet cravings.",
-        "Prepare your break‑fast meal in advance.",
-      ]},
-      { range: [24, 36], tips: [
-        "Prioritize sleep; wind down early.",
-        "Mind the salt; headaches often mean electrolytes/water.",
-        "Avoid intense new workouts; keep it easy.",
-      ]},
-      { range: [36, 999], tips: [
-        "Consider medical guidance for extended fasts.",
-        "Break gently with protein + low‑fiber foods.",
-        "Stop if you feel unwell—health over streaks.",
-      ]},
+    const TIPS = [
+      {range:[0,12],tips:["Hydrate early.","Plan to stay busy.","Black coffee/tea ok."]},
+      {range:[12,18],tips:["Light movement helps.","Deep work session.","Add salt if light-headed."]},
+      {range:[18,24],tips:["Workout distracts hunger.","Warm tea calms cravings.","Prep break-fast meal."]},
+      {range:[24,36],tips:["Sleep early.","Stay hydrated with electrolytes.","Avoid new intense exercise."]},
+      {range:[36,999],tips:["Consider medical advice.","Break gently with protein.","Stop if unwell."]}
     ];
 
-    const LS_KEYS = {
-      CURRENT_START: "fasting.currentStart",
-      SESSIONS: "fasting.sessions",
-      TARGET_HOURS: "fasting.targetHours",
+    const LS = {
+      start:"fasting.start",
+      logs:"fasting.logs",
+      target:"fasting.target"
     };
 
-    const readSessions = () => {
-      try { return JSON.parse(localStorage.getItem(LS_KEYS.SESSIONS) || "[]"); } catch { return []; }
-    };
-    const writeSessions = (s) => localStorage.setItem(LS_KEYS.SESSIONS, JSON.stringify(s));
-    const readCurrentStart = () => { const raw = localStorage.getItem(LS_KEYS.CURRENT_START); return raw ? Number(raw) : null; };
-    const writeCurrentStart = (ms) => ms==null ? localStorage.removeItem(LS_KEYS.CURRENT_START) : localStorage.setItem(LS_KEYS.CURRENT_START, String(ms));
-    const readTargetHours = () => Number(localStorage.getItem(LS_KEYS.TARGET_HOURS) || 16);
-    const writeTargetHours = (h) => localStorage.setItem(LS_KEYS.TARGET_HOURS, String(h));
+    function read(k,d){try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}}
+    function write(k,v){localStorage.setItem(k,JSON.stringify(v))}
 
-    const ProgressRing = ({ value, target }) => {
-      const pct = Math.min(100, (value / target) * 100);
-      const size = 140;
-      const stroke = 10;
-      const radius = (size - stroke) / 2;
-      const circ = 2 * Math.PI * radius;
-      const dash = (pct / 100) * circ;
+    function Progress({value,target}){
+      const pct=Math.min(100,(value/target)*100);
+      const size=140,stroke=10,r=(size-stroke)/2,c=2*Math.PI*r,dash=(pct/100)*c;
       return (
-        <svg width={size} height={size} className="block">
-          <circle cx={size/2} cy={size/2} r={radius} strokeWidth={stroke} strokeOpacity={0.15} stroke="currentColor" fill="none" />
-          <circle cx={size/2} cy={size/2} r={radius} strokeWidth={stroke} strokeLinecap="round" stroke="currentColor" fill="none" strokeDasharray={`${dash} ${circ-dash}`} transform={`rotate(-90 ${size/2} ${size/2})`} />
-          <text x="50%" y="50%" dominantBaseline="middle" textAnchor="middle" className="text-xl font-semibold">{Math.floor(value)}h</text>
-          <text x="50%" y="64%" dominantBaseline="middle" textAnchor="middle" className="text-xs opacity-70">target {target}h</text>
+        <svg width={size} height={size}>
+          <circle cx={size/2} cy={size/2} r={r} strokeWidth={stroke} strokeOpacity={0.15} stroke="currentColor" fill="none"/>
+          <circle cx={size/2} cy={size/2} r={r} strokeWidth={stroke} strokeLinecap="round" stroke="currentColor"
+            fill="none" strokeDasharray={`${dash} ${c-dash}`} transform={`rotate(-90 ${size/2} ${size/2})`}/>
+          <text x="50%" y="50%" textAnchor="middle" dominantBaseline="middle" className="text-xl font-bold">{Math.floor(value)}h</text>
+          <text x="50%" y="64%" textAnchor="middle" dominantBaseline="middle" className="text-xs opacity-70">target {target}h</text>
         </svg>
-      );
-    };
-
-    function App(){
-      const [now, setNow] = useState(Date.now());
-      const [startMs, setStartMs] = useState(readCurrentStart());
-      const [manualInput, setManualInput] = useState("");
-      const [sessions, setSessions] = useState(readSessions());
-      const [targetHours, setTargetHours] = useState(readTargetHours());
-
-      useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
-      useEffect(() => writeCurrentStart(startMs), [startMs]);
-      useEffect(() => writeSessions(sessions), [sessions]);
-      useEffect(() => writeTargetHours(targetHours), [targetHours]);
-
-      const elapsedMs = startMs ? now - startMs : 0;
-      const elapsedHours = hoursFloat(elapsedMs);
-      const currentHourMark = Math.floor(elapsedHours);
-
-      const upcomingBenefit = useMemo(() => {
-        const keys = Object.keys(DEFAULT_BENEFITS).map(Number).sort((a,b)=>a-b);
-        for(const k of keys){ if(k > elapsedHours) return { hour:k, ...DEFAULT_BENEFITS[k] }; }
-        const last = keys[keys.length-1];
-        return last ? { hour:last, ...DEFAULT_BENEFITS[last] } : null;
-      }, [elapsedHours]);
-
-      const reachedBenefits = useMemo(() => {
-        const keys = Object.keys(DEFAULT_BENEFITS).map(Number).sort((a,b)=>a-b);
-        return keys.filter(k => k <= elapsedHours).map(k => ({ hour:k, ...DEFAULT_BENEFITS[k] }));
-      }, [elapsedHours]);
-
-      const phaseTips = useMemo(() => {
-        const h = elapsedHours;
-        const block = DEFAULT_TIPS.find(b => h >= b.range[0] && h < b.range[1]) || DEFAULT_TIPS[DEFAULT_TIPS.length-1];
-        return block.tips;
-      }, [elapsedHours]);
-
-      const endFast = () => {
-        if(!startMs) return;
-        const end = Date.now();
-        const duration = end - startMs;
-        if(duration < 5*60*1000){ setStartMs(null); return; }
-        const newSession = { start:startMs, end };
-        const updated = [newSession, ...sessions].slice(0,200);
-        setSessions(updated);
-        setStartMs(null);
-      };
-
-      const nowDate = new Date();
-      const dayOfWeek = nowDate.getDay();
-      const startOfWeek = new Date(nowDate);
-      startOfWeek.setDate(nowDate.getDate() - dayOfWeek);
-      startOfWeek.setHours(0,0,0,0);
-
-      const weekSessions = sessions.filter(s => s.start >= startOfWeek.getTime());
-      const weekHours = weekSessions.reduce((acc,s)=> acc + hoursFloat(s.end - s.start), 0);
-
-      const last7Days = Array.from({length:7}).map((_,i)=>{
-        const d = new Date(startOfWeek.getTime() + i*DAY_MS);
-        const dayStart = d.getTime();
-        const dayEnd = dayStart + DAY_MS;
-        const hrs = sessions.filter(s => s.start >= dayStart && s.start < dayEnd).reduce((acc,s)=>acc + hoursFloat(s.end - s.start), 0);
-        return { label: d.toLocaleDateString(undefined,{weekday:"short"}), hours: Number(hrs.toFixed(1))};
-      });
-
-      const streak = React.useMemo(() => {
-        let count = 0;
-        for(let i=0;i<30;i++){
-          const dayStart = new Date();
-          dayStart.setHours(0,0,0,0);
-          dayStart.setDate(dayStart.getDate()-i);
-          const dayEnd = dayStart.getTime() + DAY_MS;
-          const had = sessions.some(s => s.start >= dayStart.getTime() && s.start < dayEnd);
-          const activeToday = startMs && startMs >= dayStart.getTime() && startMs < dayEnd;
-          if(had || activeToday) count++; else break;
-        }
-        return count;
-      }, [sessions, startMs]);
-
-      const targetProgressHours = Math.min(elapsedHours, targetHours);
-
-      return (
-        <div className="min-h-screen bg-slate-950 text-slate-100 p-6 flex justify-center">
-          <div className="w-full max-w-5xl grid grid-cols-1 md:grid-cols-3 gap-6">
-            <section className="md:col-span-2 bg-slate-900 rounded-2xl p-6 shadow-lg border border-slate-800">
-              <header className="flex items-center justify-between mb-4">
-                <h1 className="text-2xl font-bold">Fasting Coach</h1>
-                <div className="text-sm opacity-70">Asia/Manila time</div>
-              </header>
-
-              <div className="flex flex-col md:flex-row gap-6 items-center">
-                <div className="shrink-0"><ProgressRing value={targetProgressHours} target={targetHours} /></div>
-                <div className="flex-1">
-                  <div className="text-5xl font-extrabold tracking-tight">{formatDuration(elapsedMs)}</div>
-                  <div className="mt-1 text-sm opacity-80">Elapsed since last meal</div>
-
-                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <button onClick={()=>setStartMs(Date.now())} className="bg-emerald-500 hover:bg-emerald-600 active:scale-[.99] transition rounded-xl px-4 py-2 font-semibold">Start Now</button>
-                    <div className="flex gap-2">
-                      <input type="datetime-local" value={manualInput} onChange={(e)=>setManualInput(e.target.value)} className="w-full bg-slate-800 rounded-xl px-3 py-2 outline-none border border-slate-700" />
-                      <button onClick={()=>{ if(!manualInput) return; const parsed = new Date(manualInput).getTime(); if(!isNaN(parsed)) setStartMs(parsed); }} className="bg-slate-700 hover:bg-slate-600 rounded-xl px-3 py-2">Set</button>
-                    </div>
-                    <button onClick={endFast} className="bg-sky-500 hover:bg-sky-600 rounded-xl px-4 py-2 font-semibold">End & Log</button>
-                    <div className="flex items-center gap-2">
-                      <label className="text-sm opacity-80">Target (h)</label>
-                      <input type="number" min={12} max={72} step={1} value={targetHours} onChange={(e)=>setTargetHours(Number(e.target.value))} className="w-24 bg-slate-800 rounded-xl px-3 py-2 outline-none border border-slate-700" />
-                    </div>
-                  </div>
-
-                  <div className="mt-4 text-sm">
-                    <div className="opacity-80">Current hour mark</div>
-                    <div className="text-xl font-semibold">{Math.floor(elapsedHours)} h</div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-slate-800/50 rounded-2xl p-4 border border-slate-700">
-                  <h2 className="text-lg font-bold mb-3">Benefits Reached</h2>
-                  <ul className="space-y-2 max-h-64 overflow-auto pr-1">
-                    {Object.keys(DEFAULT_BENEFITS).map(Number).filter(k => k <= elapsedHours).length === 0 && (
-                      <li className="opacity-70 text-sm">Keep going—first milestone at 12h.</li>
-                    )}
-                    {Object.keys(DEFAULT_BENEFITS).map(Number).sort((a,b)=>a-b).filter(k => k <= elapsedHours).map((k)=>{
-                      const b = DEFAULT_BENEFITS[k];
-                      return (
-                        <li key={k} className="flex gap-3 items-start">
-                          <div className="text-sm mt-1 w-10 shrink-0 text-emerald-400">{k}h</div>
-                          <div>
-                            <div className="font-semibold">{b.title}</div>
-                            <div className="text-sm opacity-80">{b.desc}</div>
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-                <div className="bg-slate-800/50 rounded-2xl p-4 border border-slate-700">
-                  <h2 className="text-lg font-bold mb-3">Next Up</h2>
-                  {(() => {
-                    const keys = Object.keys(DEFAULT_BENEFITS).map(Number).sort((a,b)=>a-b);
-                    let next = null; for(const k of keys){ if(k > elapsedHours){ next = { hour:k, ...DEFAULT_BENEFITS[k] }; break; } }
-                    if(!next){ const last = keys[keys.length-1]; if(last) next = { hour:last, ...DEFAULT_BENEFITS[last] }; }
-                    return next ? (
-                      <div className="flex gap-3">
-                        <div className="text-sm mt-1 w-12 shrink-0 text-sky-400">{next.hour}h</div>
-                        <div>
-                          <div className="font-semibold">{next.title}</div>
-                          <div className="text-sm opacity-80">{next.desc}</div>
-                        </div>
-                      </div>
-                    ) : <div className="text-sm opacity-80">Add milestones in code if you plan to go longer.</div>;
-                  })()}
-
-                  <div className="mt-5">
-                    <h3 className="font-semibold mb-2">Phase Tips</h3>
-                    <ul className="list-disc list-inside space-y-1 text-sm opacity-90">
-                      {(() => {
-                        const h = elapsedHours;
-                        const block = DEFAULT_TIPS.find(b => h >= b.range[0] && h < b.range[1]) || DEFAULT_TIPS[DEFAULT_TIPS.length-1];
-                        return block.tips.map((t,i)=>(<li key={i}>{t}</li>));
-                      })()}
-                    </ul>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <aside className="bg-slate-900 rounded-2xl p-6 shadow-lg border border-slate-800">
-              <h2 className="text-lg font-bold mb-4">History & Weekly View</h2>
-
-              <div className="mb-4 text-sm flex items-center justify-between">
-                <div>
-                  <div className="opacity-80">This week total</div>
-                  {(() => {
-                    const nowDate = new Date();
-                    const dayOfWeek = nowDate.getDay();
-                    const startOfWeek = new Date(nowDate);
-                    startOfWeek.setDate(nowDate.getDate() - dayOfWeek);
-                    startOfWeek.setHours(0,0,0,0);
-                    const weekSessions = sessions.filter(s => s.start >= startOfWeek.getTime());
-                    const weekHours = weekSessions.reduce((acc,s)=> acc + hoursFloat(s.end - s.start), 0);
-                    return <div className="text-2xl font-semibold">{weekHours.toFixed(1)} h</div>;
-                  })()}
-                </div>
-                <div className="text-right">
-                  <div className="opacity-80">Streak (days)</div>
-                  {(() => {
-                    let count = 0;
-                    for(let i=0;i<30;i++){
-                      const dayStart = new Date();
-                      dayStart.setHours(0,0,0,0);
-                      dayStart.setDate(dayStart.getDate()-i);
-                      const dayEnd = dayStart.getTime() + DAY_MS;
-                      const had = sessions.some(s => s.start >= dayStart.getTime() && s.start < dayEnd);
-                      const activeToday = startMs && startMs >= dayStart.getTime() && startMs < dayEnd;
-                      if(had || activeToday) count++; else break;
-                    }
-                    return <div className="text-2xl font-semibold">{count}</div>;
-                  })()}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-7 gap-2 mb-6">
-                {(() => {
-                  const nowDate = new Date();
-                  const dayOfWeek = nowDate.getDay();
-                  const startOfWeek = new Date(nowDate);
-                  startOfWeek.setDate(nowDate.getDate() - dayOfWeek);
-                  startOfWeek.setHours(0,0,0,0);
-                  const items = Array.from({length:7}).map((_,i)=>{
-                    const d = new Date(startOfWeek.getTime() + i*DAY_MS);
-                    const dayStart = d.getTime();
-                    const dayEnd = dayStart + DAY_MS;
-                    const hrs = sessions.filter(s => s.start >= dayStart && s.start < dayEnd).reduce((acc,s)=>acc + hoursFloat(s.end - s.start), 0);
-                    return { label: d.toLocaleDateString(undefined,{weekday:"short"}), hours: Number(hrs.toFixed(1)) };
-                  });
-                  return items.map((d,i)=> (
-                    <div key={i} className="bg-slate-800/60 rounded-xl p-2 text-center border border-slate-700">
-                      <div className="text-xs opacity-70">{d.label}</div>
-                      <div className="text-lg font-semibold">{d.hours}</div>
-                    </div>
-                  ));
-                })()}
-              </div>
-
-              <div className="space-y-3 max-h-72 overflow-auto pr-1">
-                {sessions.length === 0 && (
-                  <div className="text-sm opacity-80">No logged fasts yet. When you press “End & Log”, they’ll appear here.</div>
-                )}
-                {sessions.map((s, idx) => {
-                  const duration = s.end - s.start;
-                  const h = hoursFloat(duration).toFixed(1);
-                  const startStr = new Date(s.start).toLocaleString();
-                  const endStr = new Date(s.end).toLocaleString();
-                  return (
-                    <div key={idx} className="bg-slate-800/60 rounded-xl p-3 border border-slate-700">
-                      <div className="flex items-center justify-between">
-                        <div className="font-semibold">{h} h</div>
-                        <button className="text-xs opacity-70 hover:opacity-100 underline" onClick={() => {
-                          const filtered = sessions.filter((_, i) => i !== idx);
-                          setSessions(filtered);
-                        }}>Delete</button>
-                      </div>
-                      <div className="text-xs opacity-80">{startStr} → {endStr}</div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="mt-6 text-xs opacity-60">Not medical advice. Stop if unwell. Consider gout care; heavy exercise + fasting may aggravate flares for some.</div>
-            </aside>
-
-            <div className="md:col-span-3 text-xs opacity-60 text-center mt-2">Built as a single file for super‑easy deployment.</div>
-          </div>
-        </div>
       );
     }
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App />);
+    function App(){
+      const [now,setNow]=useState(Date.now());
+      const [start,setStart]=useState(read(LS.start,null));
+      const [logs,setLogs]=useState(read(LS.logs,[]));
+      const [target,setTarget]=useState(read(LS.target,16));
+      const [manual,setManual]=useState("");
+
+      useEffect(()=>{const id=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(id)},[]);
+      useEffect(()=>write(LS.start,start),[start]);
+      useEffect(()=>write(LS.logs,logs),[logs]);
+      useEffect(()=>write(LS.target,target),[target]);
+
+      const elapsed=start?now-start:0, hrs=hoursFloat(elapsed);
+      const benefitReached=Object.keys(BENEFITS).map(Number).filter(h=>h<=hrs);
+      const nextHour=Object.keys(BENEFITS).map(Number).find(h=>h>hrs);
+
+      const phase=TIPS.find(t=>hrs>=t.range[0]&&hrs<t.range[1])||TIPS[TIPS.length-1];
+
+      const endFast=()=>{
+        if(!start)return;
+        const entry={start,end:Date.now()};
+        setLogs([entry,...logs]); setStart(null);
+      };
+
+      return (
+      <div className="min-h-screen p-6 flex justify-center">
+        <div className="max-w-5xl w-full grid md:grid-cols-3 gap-6">
+          <section className="md:col-span-2 bg-slate-900 rounded-2xl p-6 border border-slate-800">
+            <header className="flex justify-between mb-4"><h1 className="text-2xl font-bold">Fasting Coach</h1>
+              <div className="text-sm opacity-70">Asia/Manila</div></header>
+            <div className="flex flex-col md:flex-row gap-6 items-center">
+              <Progress value={Math.min(hrs,target)} target={target}/>
+              <div className="flex-1">
+                <div className="text-5xl font-extrabold">{formatDuration(elapsed)}</div>
+                <div className="text-sm opacity-80">Elapsed since last meal</div>
+                <div className="mt-4 grid sm:grid-cols-2 gap-2">
+                  <button onClick={()=>setStart(Date.now())} className="bg-emerald-500 rounded-xl py-2 font-semibold">Start Now</button>
+                  <div className="flex gap-2">
+                    <input type="datetime-local" value={manual} onChange={e=>setManual(e.target.value)}
+                      className="w-full bg-slate-800 rounded-xl px-2"/>
+                    <button onClick={()=>{const t=new Date(manual).getTime();if(!isNaN(t))setStart(t);}}
+                      className="bg-slate-700 px-3 rounded-xl">Set</button>
+                  </div>
+                  <button onClick={endFast} className="bg-sky-500 rounded-xl py-2 font-semibold">End & Log</button>
+                  <div className="flex gap-2 items-center text-sm">
+                    <label>Target (h)</label>
+                    <input type="number" min="12" max="72" value={target} onChange={e=>setTarget(Number(e.target.value))}
+                      className="w-20 bg-slate-800 rounded-xl px-2"/>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mt-6 grid md:grid-cols-2 gap-6">
+              <div className="bg-slate-800/50 p-4 rounded-2xl">
+                <h2 className="font-bold mb-2">Benefits Reached</h2>
+                <ul className="text-sm space-y-1 max-h-48 overflow-auto">
+                  {benefitReached.length?benefitReached.map(h=>
+                    <li key={h}><span className="text-emerald-400">{h}h:</span> {BENEFITS[h].title}</li>)
+                    :<li className="opacity-70">Keep going—first milestone at 12h.</li>}
+                </ul>
+              </div>
+              <div className="bg-slate-800/50 p-4 rounded-2xl">
+                <h2 className="font-bold mb-2">Next Up</h2>
+                {nextHour?
+                  <div className="text-sm"><span className="text-sky-400">{nextHour}h:</span> {BENEFITS[nextHour].title}</div>
+                  :<div className="text-sm opacity-70">All milestones done!</div>}
+                <h3 className="font-semibold mt-4 mb-1">Phase Tips</h3>
+                <ul className="list-disc list-inside text-sm">{phase.tips.map((t,i)=><li key={i}>{t}</li>)}</ul>
+              </div>
+            </div>
+          </section>
+
+          <aside className="bg-slate-900 rounded-2xl p-6 border border-slate-800">
+            <h2 className="font-bold mb-3">History</h2>
+            {logs.length===0 && <div className="text-sm opacity-70">No logs yet.</div>}
+            <ul className="space-y-2 max-h-72 overflow-auto text-sm">
+              {logs.map((l,i)=>{
+                const dur=hoursFloat(l.end-l.start).toFixed(1);
+                return <li key={i} className="bg-slate-800/60 p-2 rounded-xl border border-slate-700">
+                  {dur}h — {new Date(l.start).toLocaleString()}
+                </li>;
+              })}
+            </ul>
+          </aside>
+        </div>
+      </div>);
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
   </script>
 </body>
 </html>
